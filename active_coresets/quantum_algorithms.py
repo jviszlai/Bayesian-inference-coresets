@@ -12,12 +12,48 @@ import networkx as nx
 import sympy
 from qiskit import QuantumCircuit, Aer, execute
 from qiskit.quantum_info import DensityMatrix
+from active_coresets.maxcut_qaoa import solve_maxcut, gen_coreset_graph, graph_from_data
 
 class QuantumAlgorithm(ABC):
 
     @abstractmethod
     def sample_model(self, coreset: Coreset, X: List[np.ndarray], Y: List[Model]) -> Tuple[Model, Model]:
         return np.random.choice(Y), np.random.choice(Y)
+
+def generalize_model_bitstring(model_bitstring: str, coreset: Coreset, X: List[np.ndarray]) -> str:
+    cluster0 = None
+    cluster0_total = 0
+    cluster1 = None
+    cluster1_total = 0
+    for i in range(len(model_bitstring)):
+        if model_bitstring[-1 - i] == '1':
+            if cluster1 is None:
+                cluster1 = np.zeros(2)
+            cluster1 += coreset.coreset[i][0] * coreset.coreset[i][1]
+            cluster1_total += coreset.coreset[i][0]
+        else:
+            if cluster0 is None:
+                cluster0 = np.zeros(2)
+            cluster0 += coreset.coreset[i][0] * coreset.coreset[i][1]
+            cluster0_total += coreset.coreset[i][0]
+    if cluster0 is not None:
+        cluster0 /= cluster0_total
+    if cluster1 is not None:
+        cluster1 /= cluster1_total
+    generalized_model = ''
+    for data in X:
+        if cluster0 is None:
+            generalized_model += '1'
+        elif cluster1 is None:
+            generalized_model += '0'
+        else:
+            if np.linalg.norm(data - cluster0) < np.linalg.norm(data - cluster1):
+                generalized_model += '0'
+            else:
+                generalized_model += '1'
+    print(model_bitstring)
+    print(generalized_model)
+    return generalized_model[::-1] # reverse endianness
 
 class ClassicalExponentialSampler(QuantumAlgorithm):
 
@@ -238,90 +274,6 @@ class VQT(QuantumAlgorithm):
 
         return term_to_coef
 
-    def __gen_coreset_graph(self, coreset=4, taylor_order=0, r_plus=0.5, metric='dot'):
-        """
-        Generate a complete weighted graph using the provided set of coreset points
-
-        Parameters
-        ----------
-        coreset : List((weight, vector)) or int
-            Set of coreset points to use. Each point should consist of a weight
-            value and a numpy array as the vector
-        taylor_order : int
-            Order of the Taylor expansion to use when generating the weights
-        r_plus : float
-            The ratio between one of the cluster sizes to the total data size.
-            The r_minus ratio is then r_minus = 1 - r_plus
-        metric : str
-            Choose the desired metric for computing the edge weights.
-            Options include: dot, dist
-
-        Returns
-        -------
-        coreset : List((weight, vector))
-            The set of points used to construct the graph
-        G : NetworkX Graph
-            A complete weighted graph
-        H : List((coef, pauli_string))
-            The equivalent Hamiltonian for the generated graph
-        """
-        if type(coreset) is int:
-            num_points = coreset
-            # Generate a graph instance with sample coreset data
-            coreset = []
-            cluster1_size = num_points // 2
-            # generate points around x=-1, y=-1
-            for _ in range(cluster1_size):
-                # use a uniformly random weight
-                #weight = np.random.uniform(0.1,5.0,1)[0]
-                weight = 1
-                vector = np.array([np.random.normal(loc=-1, scale=0.5, size=1)[0],
-                                np.random.normal(loc=-1, scale=0.5, size=1)[0]])
-                new_point = (weight, vector)
-                coreset.append(new_point)
-
-            cluster2_size = num_points - cluster1_size
-            # generate points around x=+1, y=1
-            for _ in range(cluster2_size):
-                # use a uniformly random weight
-                #weight = np.random.uniform(0.1,5.0,1)[0]
-                weight = 1
-                vector = np.array([np.random.normal(loc=1, scale=0.5, size=1)[0],
-                                np.random.normal(loc=1, scale=0.5, size=1)[0]])
-                new_point = (weight, vector)
-                coreset.append(new_point)
-        else:
-            # check that the provided coreset is formatted properly
-            if type(coreset[0][1]) is float or type(coreset[0][1]) is np.float64:
-                raise Exception('Incorrect coreset format. Make sure weights are included')
-
-        # Generate a networkx graph with correct edge weights
-        n = len(coreset)
-        G = nx.complete_graph(n)
-        H = []
-
-        # use sympy to generate the corresponding Hamiltonian
-        term_to_coef = self.__gen_sympy_hamiltonian(n, coreset, taylor_order=taylor_order, r_plus=r_plus)
-
-        # Properly weight the graph and construct the corresponding Hamiltonian
-        for edge in G.edges():
-            pauli_str = ['I']*n
-            idx_tuple = [0]*n
-            # coreset points are labelled by their vertex index
-            v_i = edge[0]
-            v_j = edge[1]
-            # The pauli strings are indexed in BIG ENDIAN fahsion
-            # i.e. ->   ZZII = Z_0.Z_1.I_2.I_3
-            pauli_str[v_i] = 'Z'
-            pauli_str[v_j] = 'Z'
-            idx_tuple[v_i] = 1
-            idx_tuple[v_j] = 1
-            weight = term_to_coef[tuple(idx_tuple)]
-            G[v_i][v_j]['weight'] = weight
-            H.append((weight, pauli_str))
-
-        return coreset, G, H
-
     def __create_density_plot(self, data):
         """
         Visualize a density matrix
@@ -383,45 +335,10 @@ class VQT(QuantumAlgorithm):
         else:
             return DensityMatrix(state)
 
-    def __generalize_model_bitstring(self, model_bitstring: str, coreset: Coreset, X: List[np.ndarray]) -> str:
-        cluster0 = None
-        cluster0_total = 0
-        cluster1 = None
-        cluster1_total = 0
-        for i in range(len(model_bitstring)):
-            if model_bitstring[i] == '1':
-                if cluster1 is None:
-                    cluster1 = np.zeros(2)
-                cluster1 += coreset.coreset[i][0] * coreset.coreset[i][1]
-                cluster1_total += coreset.coreset[i][0]
-            else:
-                if cluster0 is None:
-                    cluster0 = np.zeros(2)
-                cluster0 += coreset.coreset[i][0] * coreset.coreset[i][1]
-                cluster0_total += coreset.coreset[i][0]
-        if cluster0 is not None:
-            cluster0 /= cluster0_total
-        if cluster1 is not None:
-            cluster1 /= cluster1_total
-        generalized_model = ''
-        for data in X:
-            if cluster0 is None:
-                generalized_model += '1'
-            elif cluster1 is None:
-                generalized_model += '0'
-            else:
-                if np.linalg.norm(data - cluster0) < np.linalg.norm(data - cluster1):
-                    generalized_model += '0'
-                else:
-                    generalized_model += '1'
-        print(model_bitstring)
-        print(generalized_model)
-        return generalized_model
-
     def sample_model(self, coreset: Coreset, X: List[np.ndarray], Y: List[Model]) -> Tuple[Model, Model]:
         if len(coreset.coreset) < 2:
             return super().sample_model(coreset, X, Y)
-        _, G, H_str = self.__gen_coreset_graph(coreset.coreset)
+        _, G, H_str = gen_coreset_graph(coreset.coreset)
         H = self.__create_maxcut_hamiltonian(H_str)
         ansatz = ZZansatz(G)
         
@@ -429,6 +346,23 @@ class VQT(QuantumAlgorithm):
         density_matrix = self.__prepare_learned_state(params, H, self.beta, ansatz)
         prob_dict = density_matrix.probabilities_dict()
         best_model_bitstring = max(prob_dict, key=prob_dict.get)
-        generalized_model_bitstring = self.__generalize_model_bitstring(best_model_bitstring, coreset, X)
+        generalized_model_bitstring = generalize_model_bitstring(best_model_bitstring, coreset, X)
+        generalized_model = Y[int(generalized_model_bitstring, 2)]
+        return generalized_model, generalized_model
+
+
+
+class QAOA(QuantumAlgorithm):
+    def __init__(self, p: int):
+        self.p = p
+
+    def sample_model(self, coreset: Coreset, X: List[np.ndarray], Y: List[Model]) -> Tuple[Model, Model]:
+        if len(coreset.coreset) < 2:
+            return super().sample_model(coreset, X, Y)
+        G, _ = graph_from_data(coreset.unweighted_data())
+        print(G.edges.data("weight", default=1))
+        print(coreset.coreset)
+        best_model_bitstring = solve_maxcut(self.p, G)
+        generalized_model_bitstring = generalize_model_bitstring(best_model_bitstring, coreset, X)
         generalized_model = Y[int(generalized_model_bitstring, 2)]
         return generalized_model, generalized_model
