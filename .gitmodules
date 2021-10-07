@@ -1,0 +1,3 @@
+[submodule "active_coresets/bayesian-coresets"]
+	path = active_coresets/bayesian-coresets
+	url = git@github.com:trevorcampbell/bayesian-coresets.git

@@ -48,3 +48,7 @@ class Model(ABC):
     def evaluate_on_coreset(self, coreset: Coreset) -> float:
         return 0.0
 
+    @abstractmethod
+    def evaluate_on_point(self, data: np.ndarray) -> float:
+        return 0.0
+

@@ -31,6 +31,7 @@ def convert_to_H(term_to_coef):
         H.append((coef, pauli_str))
     return H
 
+
 def graph_from_data(data_points):
     G = nx.Graph()
     G.add_nodes_from(list(range(len(data_points))))
@@ -44,6 +45,15 @@ def graph_from_data(data_points):
             G.add_edge(v1, v2)
             G[v1][v2]['weight'] = np.linalg.norm(np.array(data_points[v1]) - np.array(data_points[v2]))
 
+    return G, node_to_point
+
+def graph_from_weighted_data(data_points, weights):
+    G, node_to_point = graph_from_data(data_points)
+
+    for v1 in range(len(data_points)-1):
+        for v2 in range(v1 + 1, len(data_points)):
+            G[v1][v2]['weight'] *= weights[v1] * weights[v2]
+    
     return G, node_to_point
 
 '''
@@ -110,7 +120,7 @@ def gen_sympy_hamiltonian(n, coreset, taylor_order=0, r_plus=0.5):
         variable_tuple = tuple([x % 2 for x in variable_tuple])
         if any(variable_tuple): # skip constant terms, i.e. the (0,0,...,0) tuple
             term_to_coef[variable_tuple] = coefficient
-
+    print(term_to_coef)
     return term_to_coef
 
 
