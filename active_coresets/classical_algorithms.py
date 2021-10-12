@@ -1,7 +1,7 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
 
-import bayesiancoresets
+import active_coresets.bayesian_coresets.bayesiancoresets as bayesiancoresets
 from active_coresets.data_structures import Coreset, Model
 from bayesiancoresets.coreset import HilbertCoreset
 from bayesiancoresets.snnls import GIGA
@@ -48,12 +48,18 @@ class GIGACoreset(ClassicalAlgorithm):
             self.data = data
             self.ll_projector = ll_projector
             self.snnls_algo = snnls_algo
+            self.snnls = None
             bayesiancoresets.coreset.coreset.Coreset.__init__(self, **kw)
         
         def _build(self, itrs: int):
             sub_idcs = np.arange(self.data.shape[0])
             vecs = self.ll_projector.project(self.data)
+            if self.snnls:
+                self.w = self.snnls.weights()
+            else:
+                self.w = np.zeros(self.data.shape[0])
             self.snnls = self.snnls_algo(vecs.T, vecs.sum(axis=0))
+            self.snnls.w = self.w
             self.sub_idcs = sub_idcs
             super()._build(itrs)
 
