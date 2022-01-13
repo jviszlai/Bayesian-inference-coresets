@@ -14,6 +14,7 @@ from qiskit import QuantumCircuit, Aer, execute
 from qiskit.quantum_info import DensityMatrix
 from active_coresets.maxcut_qaoa import solve_maxcut, gen_coreset_graph, graph_from_weighted_data
 from active_coresets.maxcut_vqt import create_maxcut_hamiltonian, optimize_vqt, prepare_learned_state
+from active_coresets.QBM import QuantumBoltzmannMachine
 
 class QuantumAlgorithm(ABC):
 
@@ -122,3 +123,35 @@ class QAOA(QuantumAlgorithm):
         generalized_model_bitstring = generalize_model_bitstring(best_model_bitstring, coreset, X)
         generalized_model = model_from_bitstring(generalized_model_bitstring)
         return generalized_model, generalized_model
+
+class RQBM(QuantumAlgorithm):
+    def __init__(self, graph: nx.Graph, visible_nodes: List[int], hidden_nodes: List[int], beta: float = 10.0):
+        self.beta = beta
+        #self.rqbm = QuantumBoltzmannMachine(graph, visible_nodes, hidden_nodes)
+        self.graph = graph
+        self.visible_nodes = visible_nodes
+        self.hidden_nodes = hidden_nodes
+
+
+    def sample_model(self, coreset: Coreset, X: List[np.ndarray], model_from_bitstring: Callable[[str], Model], model_bitstring_len: int) -> Tuple[Model, Model]:
+        self.rqbm = QuantumBoltzmannMachine(self.graph, self.visible_nodes, self.hidden_nodes)
+        self.rqbm.exact_train_coreset(coreset=coreset, beta=self.beta, verbose=0)
+        model_dist = self.rqbm.get_distribution(self.beta)
+        
+        # For debugging
+        data_dict = {}
+        for weight, pt in coreset.coreset:
+            z_pt = tuple(-2 * pt + np.ones(pt.shape[0]))
+            if z_pt in data_dict:
+                data_dict[z_pt] += weight
+            else:
+                data_dict[z_pt] = weight
+        data_dist = {k: v / sum(data_dict.values()) for k, v in data_dict.items()}
+
+        print(f"Model dist: {model_dist}")
+        print(f"Data dist: {data_dist}")
+        print(f"Coreset: {coreset.coreset}")
+        self.rqbm.plot_dist(model_dist, data_dist)
+        # Ugly workaround for now. TODO: not this
+        model = model_from_bitstring(self.rqbm, self.beta)
+        return model, model

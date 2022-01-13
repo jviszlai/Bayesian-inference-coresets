@@ -72,6 +72,7 @@ class GIGACoreset(ClassicalAlgorithm):
     def update_coreset(self, coreset: Coreset, X: List[np.ndarray], models: List[Model]):
         self.ll_projector.update_samples(models)
         self.giga.build(1)
+        self.giga.optimize()
         wts, pts, idcs = self.giga.get()
         for wt, pt, idc in zip(wts, pts, idcs):
             if idc not in self.coreset_idcs:
