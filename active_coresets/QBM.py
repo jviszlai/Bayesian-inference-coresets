@@ -11,6 +11,8 @@ from qiskit.opflow.primitive_ops import PauliSumOp
 from active_coresets.data_structures import Coreset
 from active_coresets.population_annealing import population_annealing
 
+from active_coresets.qmc_tim_qbm import QMC_TIM_QBM
+
 class QuantumBoltzmannMachine:
     def __init__(self, graph: nx.Graph, visible_nodes: List[int], hidden_nodes: List[int], transverse_field_param: float = 2) -> None:
         '''
@@ -56,10 +58,18 @@ class QuantumBoltzmannMachine:
         
         # Parameter initialization
         # Mapping is done Index <-> Node
-        self.single_params = np.array([np.random.uniform(low=-1.0, high=1.0) for _ in range(self.num_units)])
+        self.single_params = np.array([np.random.normal(scale=.01) for _ in range(self.num_units)]).astype(np.float32)
         # Mapping is done with edges between nodes, but always sorted low -> high
-        self.double_params = {tuple(sorted(edge)): np.random.uniform(low=-1.0, high=1.0) for edge in self.graph.edges}
+        self.double_params = {tuple(sorted(edge)): np.float32(np.random.normal(scale=0.1)) for edge in self.graph.edges}
     
+        weights = np.zeros((len(self.visible_nodes), len(self.hidden_nodes))).astype(np.float32)
+        for (a, b), weight in self.double_params.items():
+            weights[a, b - len(self.visible_nodes)] = weight
+
+        params = {'gammas': np.tile(np.array(self.transverse_field_param), self.num_units).astype(np.float32),
+                    'biases': self.single_params,
+                    'weights': weights}
+        self.qmc_params = params
     
     def _gen_states(self, n: int) -> List[Tuple[int]]:
         """
@@ -90,7 +100,7 @@ class QuantumBoltzmannMachine:
                 continue
             pauli = ['I'] * self.num_units
             pauli[node] = 'Z'
-            pauli_list.append((''.join(reversed(pauli)), -1*param))
+            pauli_list.append((''.join(pauli), -1*param))
         
         # double terms
         for edge in self.graph.edges():
@@ -100,7 +110,7 @@ class QuantumBoltzmannMachine:
             pauli = ['I'] * self.num_units
             pauli[edge[0]] = 'Z'
             pauli[edge[1]] = 'Z'
-            pauli_list.append((''.join(reversed(pauli)), -1*param))
+            pauli_list.append((''.join(pauli), -1*param))
         
         # transverse field terms
         for node in range(self.num_units):
@@ -108,7 +118,7 @@ class QuantumBoltzmannMachine:
                 continue
             pauli = ['I'] * self.num_units
             pauli[node] = 'X'
-            pauli_list.append((''.join(reversed(pauli)), -1*self.transverse_field_param))
+            pauli_list.append((''.join(pauli), -1*self.transverse_field_param))
         
         return PauliSumOp.from_list(pauli_list)
 
@@ -152,8 +162,8 @@ class QuantumBoltzmannMachine:
             projector = []
             for i, total_state in enumerate(all_states):
                 row = np.zeros(int(2**self.num_units)) # Constructing an exponentially large matrix...
-                cur_vis_state = [list(reversed(total_state))[j] for j in self.visible_nodes] # index into the REVERSED tuple to get the correct ordering
-                cur_vis_state = tuple(reversed(cur_vis_state)) # reverse ordering to get (v_n-1, ..., v_2, v_1, v_0)
+                cur_vis_state = [list(total_state)[j] for j in self.visible_nodes] # index into the tuple to get the correct ordering
+                cur_vis_state = tuple(cur_vis_state) 
                 if cur_vis_state == visible_state:
                     row[i] = 1
                 projector.append(row)
@@ -188,6 +198,7 @@ class QuantumBoltzmannMachine:
     
     
     def plot_dist(self, model_dist: dict, data_dist: dict = None) -> None:
+        r_data_dist = {reversed(k): v for k, v in data_dist.items()}
         fig, ax = plt.subplots(figsize=[15,5])
         xvals, yvals = [], []
         for key, val in model_dist.items():
@@ -199,9 +210,9 @@ class QuantumBoltzmannMachine:
         
         ax.bar(xvals, yvals, color='palegreen', label=r'$P^{model}_v$', align='edge', width=width)
         
-        if data_dist is not None:
+        if r_data_dist is not None:
             data_xvals, data_yvals = [], []
-            for key, val in data_dist.items():
+            for key, val in r_data_dist.items():
                 bitstring = ''.join(['0' if b == 1 else '1' for b in key])
                 data_xvals.append(int(bitstring, 2))
                 data_yvals.append(val)
@@ -218,7 +229,7 @@ class QuantumBoltzmannMachine:
     def compute_clamped_expectation(self, node: int, visible_state: Tuple[int]) -> float:
         # Eq 34 of Amin et al.
         terms = []
-        for j, v_j in enumerate(reversed(visible_state)):
+        for j, v_j in enumerate(visible_state):
             visible_node_j = self.visible_nodes[j]
             terms.append(self.double_params.get(tuple(sorted((node, visible_node_j))), 0) * v_j)
         b_i_eff = self.single_params[node] + sum(terms)
@@ -245,11 +256,13 @@ class QuantumBoltzmannMachine:
 
     def exact_optimization(self, data_dist: dict, step_size: float = 0.1, cutoff: float = 1e-3,
                            max_epoch: int = 100, verbose: int = 0, beta: float = 10.0) -> None:
+        r_data_dist = {tuple(reversed(k)): v for k, v in data_dist.items()}
         self.loss_history = []
         cur_epoch = 1
         progress = 100
-        cur_log_likelihood = self.log_likelihood(data_dist, self.get_distribution(beta))
+        cur_log_likelihood = self.log_likelihood(r_data_dist, self.get_distribution(beta))
         while progress > cutoff and cur_epoch <= max_epoch:
+
             # Get clamped and unclamped Hamiltonians
             unclamped_hamiltonian = self.get_hamiltonian(clamped=False)
             #clamped_hamiltonian   = self.get_hamiltonian(clamped=True)
@@ -257,41 +270,43 @@ class QuantumBoltzmannMachine:
             # Get their respective low-temperature thermal states
             unclamped_rho = self.get_thermal_state(unclamped_hamiltonian, beta)
             #clamped_rho = self.get_thermal_state(clamped_hamiltonian, beta)
+           
             
             # Update parameters, Theta(n) -> Theta(n+1)
             new_single_params = copy.copy(self.single_params)
             new_double_params = copy.copy(self.double_params)
+
             
             # First, update the single parameters 
+            
             single_param_deltas = []
             for i in range(len(self.single_params)):
                 # positive phase, <z_i>_v -> clamped
                 positive_phase = 0
-                for visible_state, p_v_data in data_dist.items():
+                for visible_state, p_v_data in r_data_dist.items():
                     if i in self.visible_nodes:
-                        expectation = list(reversed(visible_state))[self.visible_node_map[i]]
+                        expectation = list(visible_state)[self.visible_node_map[i]]
                     else:
                         expectation = self.compute_clamped_expectation(i, visible_state)
+                    
                     positive_phase += p_v_data * expectation # Eq. 29 of Amin et al.
                 
-                # negative phase, <z_i> -> unclamped
+                #negative phase, <z_i> -> unclamped
                 paulistr = ['I'] * self.num_units
                 paulistr[i] = 'Z'
-                paulistr = ''.join(reversed(paulistr))
-                negative_phase = unclamped_rho.expectation_value(PauliSumOp.from_list([(paulistr, 1)])).real
-
-                
-                new_single_params[i] += step_size * (positive_phase - negative_phase) # Eq. 30 of Amin et al.
+                paulistr = ''.join(paulistr)
+                negative_phase_exact = unclamped_rho.expectation_value(PauliSumOp.from_list([(paulistr, 1)])).real
+                new_single_params[i] += step_size * (positive_phase - negative_phase_exact) # Eq. 30 of Amin et al.
                 
             # Second, update the double parameters
             for edge in self.double_params.keys():
                 # positive phase, <z_i*z_j>_v -> clamped
                 positive_phase = 0
-                for visible_state, p_v_data in data_dist.items():
+                for visible_state, p_v_data in r_data_dist.items():
                     if edge[0] in self.visible_nodes:
-                        expectation = list(reversed(visible_state))[self.visible_node_map[edge[0]]] * self.compute_clamped_expectation(edge[1], visible_state)
+                        expectation = list(visible_state)[self.visible_node_map[edge[0]]] * self.compute_clamped_expectation(edge[1], visible_state)
                     elif edge[1] in self.visible_nodes:
-                        expectation = list(reversed(visible_state))[self.visible_node_map[edge[1]]] * self.compute_clamped_expectation(edge[0], visible_state)
+                        expectation = list(visible_state)[self.visible_node_map[edge[1]]] * self.compute_clamped_expectation(edge[0], visible_state)
                     else:
                         raise Exception('Something went wrong, expected an RBM graph structure')
                     positive_phase += p_v_data * expectation
@@ -300,16 +315,15 @@ class QuantumBoltzmannMachine:
                 paulistr = ['I'] * self.num_units
                 paulistr[edge[0]] = 'Z'
                 paulistr[edge[1]] = 'Z'
-                paulistr = ''.join(reversed(paulistr))
-                negative_phase = unclamped_rho.expectation_value(PauliSumOp.from_list([(paulistr, 1)])).real
-                
-                new_double_params[edge] += step_size * (positive_phase - negative_phase) # Eq. 31 of Amin et al.
+                paulistr = ''.join(paulistr)
+                negative_phase_exact = unclamped_rho.expectation_value(PauliSumOp.from_list([(paulistr, 1)])).real
+                new_double_params[edge] += step_size * (positive_phase - negative_phase_exact) # Eq. 31 of Amin et al.
                 
             # Perform the update
             self.single_params = new_single_params
             self.double_params = new_double_params
             
-            new_log_likelihood = self.log_likelihood(data_dist, self.get_distribution(beta))
+            new_log_likelihood = self.log_likelihood(r_data_dist, self.get_distribution(beta))
             progress = abs(new_log_likelihood - cur_log_likelihood)
             self.loss_history.append(new_log_likelihood)
             
@@ -320,3 +334,52 @@ class QuantumBoltzmannMachine:
             cur_log_likelihood = new_log_likelihood
             
             cur_epoch += 1
+
+
+    def classical_train(self, data: np.ndarray, batch_size: int = 10, step_size: float = 0.1, epochs: int = 30) -> None:
+        num_batches = len(data) // batch_size
+        for epoch in range(epochs):
+            print(f'Epoch {epoch + 1}/{epochs}:')
+            for i in range(num_batches):
+                print(f'....Batch: {i + 1}/{num_batches}')
+                batch_end = (i + 1) * batch_size
+                if i == num_batches - 1:
+                    batch_end = -1
+                batch = data[i * batch_size: batch_end]
+
+                weights = np.zeros((len(self.visible_nodes), len(self.hidden_nodes))).astype(np.float32)
+                for (a, b), weight in self.double_params.items():
+                    weights[a, b - len(self.visible_nodes)] = weight
+
+                initial_params = {'gammas': np.tile(np.array(self.transverse_field_param), self.num_units).astype(np.float32),
+                                'biases': self.single_params,
+                                'weights': weights}
+            
+
+                qmc_tim = QMC_TIM_QBM(self.visible_nodes, self.hidden_nodes, initial_params=initial_params, num_replicas=512, num_its=10)
+                pos_phase_z, pos_phase_zz = qmc_tim.positive_phase(batch)
+                neg_phase_z, neg_phase_zz = qmc_tim.negative_phase()
+                self.single_params += step_size * (pos_phase_z - neg_phase_z)
+                for edge in self.double_params.keys():
+                    arr_indx = (edge[0], edge[1] - len(self.visible_nodes))
+                    self.double_params[edge] += step_size * (pos_phase_zz[arr_indx] - neg_phase_zz[arr_indx])
+        
+        weights = np.zeros((len(self.visible_nodes), len(self.hidden_nodes))).astype(np.float32)
+        for (a, b), weight in self.double_params.items():
+            weights[a, b - len(self.visible_nodes)] = weight
+        final_params = {'gammas': np.tile(np.array(self.transverse_field_param), self.num_units).astype(np.float32),
+                        'biases': self.single_params,
+                        'weights': weights}
+        self.qmc_params = final_params
+        print(f'Training done!')
+        
+        
+    def sample(self, num_samples: int) -> np.ndarray:
+        self.qmc_tim = QMC_TIM_QBM(self.visible_nodes, self.hidden_nodes, initial_params=self.qmc_params, num_replicas=512, num_its=10)    
+        replicas = self.qmc_tim.replicas
+        samples = []
+        for i in range(num_samples):
+            sample_id = np.random.randint(0, 512)
+            sample = replicas[sample_id]
+            samples.append(sample)
+        return np.array(samples)
