@@ -14,7 +14,7 @@ class QMC_TIM_QBM():
     """A quantum Monte Carlo implementation of a restricted transverse Ising model """
     """with a longitudinal field quantum Boltzmann machine."""
     def __init__(self, visible_nodes, hidden_nodes, initial_params=None,
-                 num_replicas=512, num_its=10, betas=None):
+                 num_replicas=512, num_its=10, betas=None, init_compute=True):
         # set the nodes
         self.visible_nodes = visible_nodes
         self.hidden_nodes = hidden_nodes
@@ -63,7 +63,8 @@ class QMC_TIM_QBM():
                                      .astype(np.float32))
 
         # replicate the system and look at the first imaginary time slice
-        self.replicas = self.pa()[:, 0]
+        if init_compute:
+            self.replicas = self.pa()[:, 0]
 
     @tf.function
     def random_samples(self, num_samples=1024):

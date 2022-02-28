@@ -5,6 +5,7 @@ import networkx as nx
 import matplotlib.pyplot as plt
 import copy
 import scipy
+import scipy.stats
 import qiskit
 from qiskit import opflow
 from qiskit.opflow.primitive_ops import PauliSumOp
@@ -372,8 +373,73 @@ class QuantumBoltzmannMachine:
                         'weights': weights}
         self.qmc_params = final_params
         print(f'Training done!')
+    
+    def classical_train_disc(self, data: np.ndarray, label_len: int, batch_size: int=10, step_size: float=0.1, epochs: int=30) -> None:
+        num_batches = len(data) // batch_size
+        for epoch in range(epochs):
+            print(f'Epoch {epoch + 1}/{epochs}:')
+            for i in range(num_batches):
+                print(f'....Batch: {i + 1}/{num_batches}')
+                batch_end = (i + 1) * batch_size
+                if i == num_batches - 1:
+                    batch_end = -1
+                batch = data[i * batch_size: batch_end]
+
+                '''
+                Difference from generative case: Always clamp data, only unclamp labels
+                '''
+
+                weights = np.zeros((len(self.visible_nodes), len(self.hidden_nodes))).astype(np.float32)
+                for (a, b), weight in self.double_params.items():
+                    weights[a, b - len(self.visible_nodes)] = weight
+
+                initial_params = {'gammas': np.tile(np.array(self.transverse_field_param), self.num_units).astype(np.float32),
+                                'biases': self.single_params,
+                                'weights': weights}
+                
+                qmc_tim_pos = QMC_TIM_QBM(self.visible_nodes, self.hidden_nodes, initial_params=initial_params, num_replicas=512, num_its=10, init_compute=False)
+                pos_phase_z, pos_phase_zz = qmc_tim_pos.positive_phase(batch)
+
+                clamped_exp = np.mean(batch[:, :-label_len], axis=0)
+                clamped_range = len(self.visible_nodes) - label_len
+
+                new_biases = np.copy(self.single_params[-(label_len + len(self.hidden_nodes)):])
+                for a in range(len(self.hidden_nodes)):
+                    b_eff = new_biases[label_len + a]
+                    for v in range(clamped_exp.shape[0]):
+                        b_eff += weights[v, a] * clamped_exp[v] 
+                    new_biases[label_len + a] = b_eff 
+                initial_params['biases'] = new_biases
+                
+                new_visible = [v - clamped_range for v in self.visible_nodes[-label_len:]]
+                new_hidden = [h - clamped_range for h in self.hidden_nodes]
+                new_weights = weights[-label_len:, :]
+                initial_params['weights'] = new_weights
+                initial_params['gammas'] = initial_params['gammas'][-(label_len + len(self.hidden_nodes)):]
+
+                qmc_tim_neg = QMC_TIM_QBM(new_visible, new_hidden, initial_params=initial_params, num_replicas=512, num_its=10)
+                neg_phase_z, neg_phase_zz = qmc_tim_neg.negative_phase()
+
+
+                self.single_params += step_size * (pos_phase_z - np.concatenate((clamped_exp, neg_phase_z)))
+                for edge in self.double_params.keys():
+                    pos_arr_indx = (edge[0], edge[1] - len(self.visible_nodes))
+                    if edge[0] < clamped_range:
+                        neg_phase = clamped_exp[edge[0]] * neg_phase_z[edge[1] - clamped_range]
+                        self.double_params[edge] += step_size * (pos_phase_zz[pos_arr_indx] - neg_phase)
+                    else:
+                        neg_arr_indx = (edge[0] - clamped_range, edge[1] - clamped_range - label_len)
+                        self.double_params[edge] += step_size * (pos_phase_zz[pos_arr_indx] - neg_phase_zz[neg_arr_indx])
         
-        
+        weights = np.zeros((len(self.visible_nodes), len(self.hidden_nodes))).astype(np.float32)
+        for (a, b), weight in self.double_params.items():
+            weights[a, b - len(self.visible_nodes)] = weight
+        final_params = {'gammas': np.tile(np.array(self.transverse_field_param), self.num_units).astype(np.float32),
+                        'biases': self.single_params,
+                        'weights': weights}
+        self.qmc_params = final_params
+        print(f'Training done!')
+
     def sample(self, num_samples: int) -> np.ndarray:
         self.qmc_tim = QMC_TIM_QBM(self.visible_nodes, self.hidden_nodes, initial_params=self.qmc_params, num_replicas=512, num_its=10)    
         replicas = self.qmc_tim.replicas
@@ -383,3 +449,23 @@ class QuantumBoltzmannMachine:
             sample = replicas[sample_id]
             samples.append(sample)
         return np.array(samples)
+
+    def predict(self, label_len, data_pt: np.ndarray) -> np.ndarray:
+        clamped_range = len(self.visible_nodes) - label_len
+        params = self.qmc_params.copy()
+        new_biases = np.copy(self.single_params[-(label_len + len(self.hidden_nodes)):])
+        for a in range(len(self.hidden_nodes)):
+            b_eff = new_biases[label_len + a]
+            for v in range(data_pt.shape[0]):
+                b_eff += params['weights'][v, a] * data_pt[v] 
+            new_biases[label_len + a] = b_eff 
+        params['biases'] = new_biases
+        
+        new_visible = [v - clamped_range for v in self.visible_nodes[-label_len:]]
+        new_hidden = [h - clamped_range for h in self.hidden_nodes]
+        new_weights = params['weights'][-label_len:, :]
+        params['weights'] = new_weights
+        params['gammas'] = params['gammas'][-(label_len + len(self.hidden_nodes)):]
+
+        qmc_tim = QMC_TIM_QBM(new_visible, new_hidden, initial_params=params, num_replicas=512, num_its=10)
+        return scipy.stats.mode(qmc_tim.replicas[:,:label_len])[0]
