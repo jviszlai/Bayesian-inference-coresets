@@ -59,9 +59,9 @@ class QuantumBoltzmannMachine:
         
         # Parameter initialization
         # Mapping is done Index <-> Node
-        self.single_params = np.array([np.random.normal(scale=.01) for _ in range(self.num_units)]).astype(np.float32)
+        self.single_params = np.array([np.random.normal(scale=.5) for _ in range(self.num_units)]).astype(np.float32)
         # Mapping is done with edges between nodes, but always sorted low -> high
-        self.double_params = {tuple(sorted(edge)): np.float32(np.random.normal(scale=0.1)) for edge in self.graph.edges}
+        self.double_params = {tuple(sorted(edge)): np.float32(np.random.normal(scale=0.01)) for edge in self.graph.edges}
     
         weights = np.zeros((len(self.visible_nodes), len(self.hidden_nodes))).astype(np.float32)
         for (a, b), weight in self.double_params.items():
@@ -360,6 +360,10 @@ class QuantumBoltzmannMachine:
                 qmc_tim = QMC_TIM_QBM(self.visible_nodes, self.hidden_nodes, initial_params=initial_params, num_replicas=512, num_its=10)
                 pos_phase_z, pos_phase_zz = qmc_tim.positive_phase(batch)
                 neg_phase_z, neg_phase_zz = qmc_tim.negative_phase()
+                neg_phase_z *= -1
+                mask = np.ones(pos_phase_z.shape)
+                mask[-len(self.hidden_nodes):] = -1
+                pos_phase_z = pos_phase_z * mask
                 self.single_params += step_size * (pos_phase_z - neg_phase_z)
                 for edge in self.double_params.keys():
                     arr_indx = (edge[0], edge[1] - len(self.visible_nodes))
@@ -419,7 +423,10 @@ class QuantumBoltzmannMachine:
 
                 qmc_tim_neg = QMC_TIM_QBM(new_visible, new_hidden, initial_params=initial_params, num_replicas=512, num_its=10)
                 neg_phase_z, neg_phase_zz = qmc_tim_neg.negative_phase()
-
+                neg_phase_z *= -1
+                mask = np.ones(pos_phase_z.shape)
+                mask[-len(self.hidden_nodes):] = -1
+                pos_phase_z = pos_phase_z * mask
 
                 self.single_params += step_size * (pos_phase_z - np.concatenate((clamped_exp, neg_phase_z)))
                 for edge in self.double_params.keys():
