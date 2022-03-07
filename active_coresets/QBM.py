@@ -336,6 +336,82 @@ class QuantumBoltzmannMachine:
             
             cur_epoch += 1
 
+    def exact_train(self, data: np.ndarray, data_dist, batch_size: int = 10, step_size: float = 0.1, epochs: int = 30, beta: float = 10.0) -> None:
+        cur_log_likelihood = self.log_likelihood(data_dist, self.get_distribution(beta))
+
+        num_batches = len(data) // batch_size
+        for epoch in range(epochs):
+            print(f'Epoch {epoch + 1}/{epochs}:')
+            for b in range(num_batches):
+                print(f'....Batch: {b + 1}/{num_batches}')
+                batch_end = (b + 1) * batch_size
+                if b == num_batches - 1:
+                    batch_end = -1
+                batch = data[b * batch_size: batch_end]
+
+                # Get clamped and unclamped Hamiltonians
+                unclamped_hamiltonian = self.get_hamiltonian(clamped=False)
+                
+                # Get their respective low-temperature thermal states
+                unclamped_rho = self.get_thermal_state(unclamped_hamiltonian, beta)
+
+                # Update parameters, Theta(n) -> Theta(n+1)
+                new_single_params = copy.copy(self.single_params)
+                new_double_params = copy.copy(self.double_params)
+
+                for i in range(len(self.single_params)):
+                    # positive phase, <z_i>_v -> clamped
+                    positive_phase = 0
+                    for visible_state in batch:
+                        if i in self.visible_nodes:
+                            expectation = visible_state[i]
+                        else:
+                            expectation = self.compute_clamped_expectation(i, visible_state)
+                        
+                        positive_phase += expectation # Eq. 29 of Amin et al.
+                    positive_phase /= batch_size
+                    
+                    #negative phase, <z_i> -> unclamped
+                    paulistr = ['I'] * self.num_units
+                    paulistr[i] = 'Z'
+                    paulistr = ''.join(paulistr)
+                    negative_phase_exact = unclamped_rho.expectation_value(PauliSumOp.from_list([(paulistr, 1)])).real
+                    new_single_params[i] += step_size * (positive_phase - negative_phase_exact) # Eq. 30 of Amin et al.
+                
+                # Second, update the double parameters
+                for edge in self.double_params.keys():
+                    # positive phase, <z_i*z_j>_v -> clamped
+                    positive_phase = 0
+                    for visible_state in batch:
+                        if edge[0] in self.visible_nodes:
+                            expectation = visible_state[edge[0]] * self.compute_clamped_expectation(edge[1], visible_state)
+                        elif edge[1] in self.visible_nodes:
+                            expectation = visible_state[edge[1]] * self.compute_clamped_expectation(edge[0], visible_state)
+                        else:
+                            raise Exception('Something went wrong, expected an RBM graph structure')
+                        positive_phase += expectation
+                    positive_phase /= batch_size
+                    
+                    # negative phase, <z_i*z_j> -> unclamped
+                    paulistr = ['I'] * self.num_units
+                    paulistr[edge[0]] = 'Z'
+                    paulistr[edge[1]] = 'Z'
+                    paulistr = ''.join(paulistr)
+                    negative_phase_exact = unclamped_rho.expectation_value(PauliSumOp.from_list([(paulistr, 1)])).real
+                    new_double_params[edge] += step_size * (positive_phase - negative_phase_exact) # Eq. 31 of Amin et al.
+                    
+                # Perform the update
+                self.single_params = new_single_params
+                self.double_params = new_double_params
+
+                new_log_likelihood = self.log_likelihood(data_dist, self.get_distribution(beta))
+                progress = abs(new_log_likelihood - cur_log_likelihood)
+
+                print(f'Finished batch: {b}:')
+                print(f'\t|L_i - L_i+1| = |{cur_log_likelihood:.5f} - {new_log_likelihood:.5f}| = {progress:.5f}')
+
+                cur_log_likelihood = new_log_likelihood
+
 
     def classical_train(self, data: np.ndarray, batch_size: int = 10, step_size: float = 0.1, epochs: int = 30) -> None:
         num_batches = len(data) // batch_size
@@ -450,6 +526,7 @@ class QuantumBoltzmannMachine:
     def sample(self, num_samples: int) -> np.ndarray:
         self.qmc_tim = QMC_TIM_QBM(self.visible_nodes, self.hidden_nodes, initial_params=self.qmc_params, num_replicas=512, num_its=10)    
         replicas = self.qmc_tim.replicas
+        print(replicas)
         samples = []
         for i in range(num_samples):
             sample_id = np.random.randint(0, 512)

@@ -92,8 +92,8 @@ class QMC_TIM_QBM():
             quantum_energy_weights, z[-1]), z[0]),
                                 name='quantum_energy')
 
-        #tf.print('Classical energy:', classical_energy)
-        #tf.print('Quantum energy:', quantum_energy)
+        # tf.print('Classical energy:', classical_energy)
+        # tf.print('Quantum energy:', quantum_energy)
 
         # return the total energy
         return tf.add(classical_energy, quantum_energy, name='energy')
