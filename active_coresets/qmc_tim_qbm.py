@@ -269,14 +269,14 @@ class QMC_TIM_QBM():
 
         # return the positive phases
         return (tf.concat([tf.reduce_mean(data, axis=0),
-                           tf.reduce_mean(exp_hidden_biases, axis=0)], 0),
+                           tf.multiply(-1.0, tf.reduce_mean(exp_hidden_biases, axis=0))], 0),
                 tf.reduce_mean(exp_weights, axis=0))
 
     @tf.function
     def negative_phase(self):
         """Compute the negative phase of the gradient."""
         # calculate the expectation values of various observables
-        exp_biases = tf.reduce_mean(self.replicas, axis=0)
+        exp_biases = tf.multiply(-1.0, tf.reduce_mean(self.replicas, axis=0))
         exp_weights = tf.reduce_mean(tf.einsum('ij,ik->ijk',
                                                self.replicas[:, :len(self.visible_nodes)],
                                                self.replicas[:, len(self.visible_nodes):]), axis=0)
