@@ -64,7 +64,7 @@ class QMC_TIM_QBM():
 
         # replicate the system and look at the first imaginary time slice
         if init_compute:
-            self.replicas = self.pa()[:, 0]
+            self.pa()
 
     @tf.function
     def random_samples(self, num_samples=1024):
@@ -247,7 +247,7 @@ class QMC_TIM_QBM():
                                       name='replicas')
 
                 # return the annealed replicas
-                return replicas[:current_num_replicas]
+                self.replicas = replicas[:current_num_replicas][:, 0]
 
     @tf.function
     def positive_phase(self, data):
@@ -277,9 +277,10 @@ class QMC_TIM_QBM():
         """Compute the negative phase of the gradient."""
         # calculate the expectation values of various observables
         exp_biases = tf.multiply(-1.0, tf.reduce_mean(self.replicas, axis=0))
-        exp_weights = tf.reduce_mean(tf.einsum('ij,ik->ijk',
-                                               self.replicas[:, :len(self.visible_nodes)],
-                                               self.replicas[:, len(self.visible_nodes):]), axis=0)
+        # exp_weights = tf.reduce_mean(tf.einsum('ij,ik->ijk',
+        #                                        self.replicas[:, :len(self.visible_nodes)],
+        #                                        self.replicas[:, len(self.visible_nodes):]), axis=0)
+        exp_weights = tf.einsum('i,j->ij', tf.gather(exp_biases, list(self.visible_nodes)), tf.gather(exp_biases, list(self.hidden_nodes)))
 
         # return the negative phases
         return exp_biases, exp_weights
