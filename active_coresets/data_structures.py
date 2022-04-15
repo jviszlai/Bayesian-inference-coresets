@@ -1,6 +1,6 @@
 import numpy as np
 from abc import ABC, abstractmethod
-from typing import List, Tuple
+from typing import List, Tuple, Dict
 
 class Coreset:
     
@@ -44,11 +44,30 @@ class Model(ABC):
         """
         self.model = model
     
-    @abstractmethod
     def evaluate_on_coreset(self, coreset: Coreset) -> float:
         return 0.0
 
-    @abstractmethod
     def evaluate_on_point(self, data: np.ndarray) -> float:
         return 0.0
 
+class Distribution(Model):
+    def __init__(self, dist: Dict[int, float]):
+        self.dist = dist
+    
+    def sample(self, num_samples: int) -> np.ndarray:
+        """
+        Samples from the distribution
+        
+        Parameters
+        ----------
+        num_samples: int
+            Number of samples to sample
+        
+        Returns
+        -------
+        samples: np.ndarray
+            Samples from the distribution
+        """
+        keys = list(self.dist.keys())
+        sample_ids = np.random.choice(range(len(keys)), num_samples, p=list(self.dist.values()))
+        return [keys[id] for id in sample_ids]

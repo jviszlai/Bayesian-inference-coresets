@@ -3,18 +3,56 @@
 
 """Author: Eric Anschuetz"""
 
-
 # import external libraries
 import numpy as np
 import tensorflow as tf
 
-# import internal libraries=
 
-class QMC_TIM_QBM():
+
+"""Implement a Boltzmann machine."""
+
+# import external libraries
+from abc import ABC, abstractmethod
+import tensorflow as tf
+from tensorflow.python.client import device_lib
+
+class BoltzmannMachine(ABC):
+    """A Boltzmann machine."""
+    def random_samples(self, num_samples=1024):
+        """Draw random samples from the Boltzmann machine."""
+        pass
+
+    @staticmethod
+    @tf.function
+    def mini_batch_generator(train_data, num_epochs, batch_size=16):
+        """Create an iterator to generate mini-batches."""
+        # batch and shuffle the data
+        dataset = tf.data.Dataset.from_tensor_slices(train_data)
+        dataset = dataset.shuffle(len(train_data))
+        dataset = dataset.batch(batch_size)
+        dataset = dataset.repeat(count=num_epochs)
+
+        # determine if there is a GPU
+        local_device_protos = device_lib.list_local_devices()
+        if any([True for x in local_device_protos if x.device_type == 'GPU']):
+            dataset = dataset.apply(tf.data.experimental.prefetch_to_device('/gpu:0'))
+
+        # create a data iterator
+        iterator = iter(dataset)
+
+        # return an operation to generate mini-batches
+        return iterator.get_next()
+
+    @abstractmethod
+    def train_op(self, minibatch, optimizer):
+        """Create an operation to train the Boltzmann machine."""
+        pass
+
+class QMC_TIM_QBM(BoltzmannMachine):
     """A quantum Monte Carlo implementation of a restricted transverse Ising model """
     """with a longitudinal field quantum Boltzmann machine."""
     def __init__(self, visible_nodes, hidden_nodes, initial_params=None,
-                 num_replicas=512, num_its=10, betas=None, init_compute=True):
+                 num_replicas=512, num_its=10, betas=None):
         # set the nodes
         self.visible_nodes = visible_nodes
         self.hidden_nodes = hidden_nodes
@@ -63,8 +101,7 @@ class QMC_TIM_QBM():
                                      .astype(np.float32))
 
         # replicate the system and look at the first imaginary time slice
-        if init_compute:
-            self.pa()
+        self.replicas = self.pa()[:, 0]
 
     @tf.function
     def random_samples(self, num_samples=1024):
@@ -91,9 +128,6 @@ class QMC_TIM_QBM():
         quantum_energy = tf.add(bulk_quantum_energy, tf.einsum('i,i->', tf.multiply(
             quantum_energy_weights, z[-1]), z[0]),
                                 name='quantum_energy')
-
-        # tf.print('Classical energy:', classical_energy)
-        # tf.print('Quantum energy:', quantum_energy)
 
         # return the total energy
         return tf.add(classical_energy, quantum_energy, name='energy')
@@ -218,7 +252,7 @@ class QMC_TIM_QBM():
                                       self.params['gammas']), self.num_its)))
             beta_qe_matrix = tf.einsum('i,ijk->ijk',
                                        tf.multiply(0.5, tf.math.log(log_args)), self.q_adj_mat)
-           
+
             # perform one PIMC step
             rands = tf.random.uniform([current_num_replicas, self.num_its, self.num_total_nodes])
             with tf.control_dependencies([
@@ -227,7 +261,6 @@ class QMC_TIM_QBM():
                     j, replicas, self.betas[tf.add(i, 1)],
                     beta_qe_matrix, rands),
                                            tf.range(tf.cast(current_num_replicas, tf.float32)))
-            
             with tf.control_dependencies([
                     replicas[:current_num_replicas].assign(equil_replicas)]):
                 return tf.add(i, 1), current_num_replicas
@@ -247,7 +280,7 @@ class QMC_TIM_QBM():
                                       name='replicas')
 
                 # return the annealed replicas
-                self.replicas = replicas[:current_num_replicas][:, 0]
+                return replicas[:current_num_replicas]
 
     @tf.function
     def positive_phase(self, data):
@@ -269,18 +302,17 @@ class QMC_TIM_QBM():
 
         # return the positive phases
         return (tf.concat([tf.reduce_mean(data, axis=0),
-                           tf.multiply(-1.0, tf.reduce_mean(exp_hidden_biases, axis=0))], 0),
+                           tf.reduce_mean(exp_hidden_biases, axis=0)], 0),
                 tf.reduce_mean(exp_weights, axis=0))
 
     @tf.function
     def negative_phase(self):
         """Compute the negative phase of the gradient."""
         # calculate the expectation values of various observables
-        exp_biases = tf.multiply(-1.0, tf.reduce_mean(self.replicas, axis=0))
-        # exp_weights = tf.reduce_mean(tf.einsum('ij,ik->ijk',
-        #                                        self.replicas[:, :len(self.visible_nodes)],
-        #                                        self.replicas[:, len(self.visible_nodes):]), axis=0)
-        exp_weights = tf.einsum('i,j->ij', tf.gather(exp_biases, list(self.visible_nodes)), tf.gather(exp_biases, list(self.hidden_nodes)))
+        exp_biases = tf.reduce_mean(self.replicas, axis=0)
+        exp_weights = tf.reduce_mean(tf.einsum('ij,ik->ijk',
+                                               self.replicas[:, :len(self.visible_nodes)],
+                                               self.replicas[:, len(self.visible_nodes):]), axis=0)
 
         # return the negative phases
         return exp_biases, exp_weights
@@ -299,3 +331,4 @@ class QMC_TIM_QBM():
     def train_op(self, minibatch, optimizer):
         """Create an operation to train the QMC TIM QBM."""
         return optimizer.apply_gradients(self.gen_grads_and_vars(minibatch))
+
