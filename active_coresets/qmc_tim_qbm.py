@@ -4,6 +4,7 @@
 """Author: Eric Anschuetz"""
 
 # import external libraries
+from sqlite3 import adapt
 import numpy as np
 import tensorflow as tf
 
@@ -52,7 +53,9 @@ class QMC_TIM_QBM(BoltzmannMachine):
     """A quantum Monte Carlo implementation of a restricted transverse Ising model """
     """with a longitudinal field quantum Boltzmann machine."""
     def __init__(self, visible_nodes, hidden_nodes, initial_params=None,
-                 num_replicas=512, num_its=10, betas=None):
+                 num_replicas=512, num_its=10, betas=None, coreset=False, adaptive=False):
+        self.coreset = coreset
+        self.adaptive = adaptive
         # set the nodes
         self.visible_nodes = visible_nodes
         self.hidden_nodes = hidden_nodes
@@ -285,34 +288,65 @@ class QMC_TIM_QBM(BoltzmannMachine):
     @tf.function
     def positive_phase(self, data):
         """Compute the positive phase of the gradient."""
-        # compute the effective biases
-        effective_biases = tf.add(tf.gather(self.params['biases'], list(self.hidden_nodes)),
-                                  tf.einsum('ij,jk->ik', data, self.params['weights']))
 
-        # compute the effective quantum scaling
-        effective_qs = tf.sqrt(tf.add(tf.square(tf.gather(self.params['gammas'],
-                                                          list(self.hidden_nodes))),
-                                      tf.square(effective_biases)))
+        if self.coreset:
+            batch = data
+            pts = batch[:,1:]
+            weights = batch[:,0]
+            total_weight = tf.reduce_sum(weights)
 
-        # compute the clamped correlation functions
-        exp_hidden_biases = tf.negative(tf.multiply(tf.divide(effective_biases,
-                                                              effective_qs),
-                                                    tf.tanh(effective_qs)))
-        exp_weights = tf.einsum('ij,ik->ijk', data, exp_hidden_biases)
+            # compute the effective biases
+            effective_biases = tf.add(tf.gather(self.params['biases'], list(self.hidden_nodes)),
+                                    tf.einsum('ij,jk->ik', pts, self.params['weights']))
 
-        # return the positive phases
-        return (tf.concat([tf.reduce_mean(data, axis=0),
-                           tf.reduce_mean(exp_hidden_biases, axis=0)], 0),
-                tf.reduce_mean(exp_weights, axis=0))
+            # compute the effective quantum scaling
+            effective_qs = tf.sqrt(tf.add(tf.square(tf.gather(self.params['gammas'],
+                                                            list(self.hidden_nodes))),
+                                        tf.square(effective_biases)))
+
+            # compute the clamped correlation functions
+            exp_hidden_biases = tf.negative(tf.multiply(tf.divide(effective_biases,
+                                                                effective_qs),
+                                                        tf.tanh(effective_qs)))
+            exp_weights = tf.einsum('ij,ik->ijk', pts, exp_hidden_biases)
+
+            avg_pts = tf.divide(tf.einsum('i,ij->j', weights, pts), total_weight)
+            avg_exp_hidden_biases = tf.divide(tf.einsum('i,ij->j', weights, exp_hidden_biases), total_weight)
+            avg_exp_weights = tf.divide(tf.einsum('i,ijk->jk', weights, exp_weights), total_weight)
+
+            # return the positive phases
+            return (tf.concat([avg_pts, tf.multiply(-1.0, avg_exp_hidden_biases)], 0), avg_exp_weights)
+
+        else:
+            # compute the effective biases
+            effective_biases = tf.add(tf.gather(self.params['biases'], list(self.hidden_nodes)),
+                                    tf.einsum('ij,jk->ik', data, self.params['weights']))
+
+            # compute the effective quantum scaling
+            effective_qs = tf.sqrt(tf.add(tf.square(tf.gather(self.params['gammas'],
+                                                            list(self.hidden_nodes))),
+                                        tf.square(effective_biases)))
+
+            # compute the clamped correlation functions
+            exp_hidden_biases = tf.negative(tf.multiply(tf.divide(effective_biases,
+                                                                effective_qs),
+                                                        tf.tanh(effective_qs)))
+            exp_weights = tf.einsum('ij,ik->ijk', data, exp_hidden_biases)
+
+            # return the positive phases
+            return (tf.concat([tf.reduce_mean(data, axis=0),
+                            tf.multiply(-1.0, tf.reduce_mean(exp_hidden_biases, axis=0))], 0),
+                    tf.reduce_mean(exp_weights, axis=0))
 
     @tf.function
     def negative_phase(self):
         """Compute the negative phase of the gradient."""
         # calculate the expectation values of various observables
-        exp_biases = tf.reduce_mean(self.replicas, axis=0)
+        exp_biases = tf.multiply(-1.0, tf.reduce_mean(self.replicas, axis=0))
         exp_weights = tf.reduce_mean(tf.einsum('ij,ik->ijk',
                                                self.replicas[:, :len(self.visible_nodes)],
                                                self.replicas[:, len(self.visible_nodes):]), axis=0)
+        
 
         # return the negative phases
         return exp_biases, exp_weights
@@ -326,6 +360,8 @@ class QMC_TIM_QBM(BoltzmannMachine):
         # calculate and return the gradients
         bias_grads = tf.subtract(bias_pps, bias_nps)
         weight_grads = tf.subtract(weight_pps, weight_nps)
+        self.bias_grads = bias_grads
+        self.weight_grads = weight_grads
         return [(bias_grads, self.params['biases']), (weight_grads, self.params['weights'])]
 
     def train_op(self, minibatch, optimizer):
